@@ -1,0 +1,5 @@
+# Another Service Plugin v1.0.0
+This is a test plugin for a different service.
+Service: another
+Platform: linux_amd64
+Version: v1.0.0

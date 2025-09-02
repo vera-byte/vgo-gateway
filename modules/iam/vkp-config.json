@@ -1,0 +1,41 @@
+{
+  "module_path": "./cmd",
+  "output_path": "./iam.vkp",
+  "metadata": {
+    "name": "iam",
+    "version": "1.0.0",
+    "description": "Identity and Access Management module for user authentication and authorization",
+    "author": "VGO Team",
+    "license": "MIT",
+    "api_version": "v1",
+    "min_gateway_version": "1.0.0",
+    "standalone": true,
+    "dependencies": [],
+    "config_schema": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "IAM service endpoint",
+          "default": "localhost:9090"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Request timeout in seconds",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 300
+        }
+      },
+      "required": ["endpoint"]
+    }
+  },
+  "build_tags": ["plugin"],
+  "goos": "linux",
+  "goarch": "amd64",
+  "ldflags": "-s -w -X main.version=1.0.0 -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "include_files": [
+    "README.md",
+    "config.yaml.example"
+  ]
+}

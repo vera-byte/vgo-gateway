@@ -1,0 +1,6 @@
+# Test Plugin v2.0.0
+This is a test plugin for version conflict detection.
+Service: test
+Platform: linux_amd64
+Version: v2.0.0
+This is the newer version that should replace v1.0.0

@@ -1,0 +1,20 @@
+# VGO Admin Gateway Configuration
+server:
+  port: "8080"
+  mode: "debug"
+  host: "0.0.0.0"
+
+iam:
+  endpoint: "localhost:9090"
+  timeout: 30
+
+jwt:
+  secret: "your-jwt-secret-key"
+  expiry: 24
+
+# Module configurations
+modules:
+  iam:
+    endpoint: "localhost:9090"
+    timeout: 30
+    enabled: true
