@@ -1,0 +1,297 @@
+name: Release vgo-gateway
+
+# 触发条件：推送标签时
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  GO_VERSION: '1.24.1'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: vera-byte/vgo-gateway
+
+jobs:
+  # 测试作业
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: |
+          cd vgo-gateway
+          go mod download
+
+      - name: Run tests
+        run: |
+          cd vgo-gateway
+          go test -v -race -coverprofile=coverage.out ./...
+        env:
+          REDIS_URL: redis://localhost:6379
+
+  # 代码质量检查
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: vgo-gateway
+          args: --timeout=5m
+
+  # 安全扫描
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Run Gosec Security Scanner
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: './vgo-gateway/...'
+
+  # 构建和发布
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    needs: [test, lint, security]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build binary
+        run: |
+          cd vgo-gateway
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X github.com/vera-byte/vgo-gateway/internal/version.Version=${{ steps.version.outputs.version }} \
+            -X github.com/vera-byte/vgo-gateway/internal/version.Commit=${{ github.sha }} \
+            -X github.com/vera-byte/vgo-gateway/internal/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o vgo-gateway ./cmd
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./vgo-gateway/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" --no-merges)
+          else
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: vgo-gateway ${{ steps.version.outputs.version }}
+          body: |
+            ## 🚀 vgo-gateway ${{ steps.version.outputs.version }}
+            
+            ### 📋 更新日志
+            
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ### 🐳 Docker 镜像
+            
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ```
+            
+            ### 📦 二进制文件
+            
+            ```bash
+            # 从源码构建
+            git clone https://github.com/vera-byte/vgo-gateway.git
+            cd vgo-gateway
+            git checkout ${{ steps.version.outputs.version }}
+            go build -o vgo-gateway ./cmd
+            ```
+            
+            ### 🔧 部署说明
+            
+            1. 使用 Docker Compose:
+            ```yaml
+            version: '3.8'
+            services:
+              vgo-gateway:
+                image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+                ports:
+                  - "8080:8080"
+                  - "9090:9090"
+                environment:
+                  - REDIS_URL=redis://redis:6379
+                depends_on:
+                  - redis
+              redis:
+                image: redis:7-alpine
+                ports:
+                  - "6379:6379"
+            ```
+            
+            2. 使用 Kubernetes:
+            ```bash
+            kubectl apply -f k8s/vgo-gateway.yaml
+            kubectl set image deployment/vgo-gateway vgo-gateway=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ```
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+
+  # 安全扫描Docker镜像
+  security-scan:
+    name: Security Scan Docker Image
+    runs-on: ubuntu-latest
+    needs: [build-and-release]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-release.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # 通知作业
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [build-and-release, security-scan]
+    if: always()
+    steps:
+      - name: Notify on success
+        if: needs.build-and-release.result == 'success'
+        run: |
+          echo "✅ vgo-gateway ${{ needs.build-and-release.outputs.version }} 发布成功！"
+          echo "🐳 Docker镜像: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-release.outputs.version }}"
+          # 这里可以添加其他通知方式，如Slack、钉钉等
+
+      - name: Notify on failure
+        if: needs.build-and-release.result == 'failure'
+        run: |
+          echo "❌ vgo-gateway 发布失败！"
+          # 这里可以添加其他通知方式，如Slack、钉钉等

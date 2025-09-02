@@ -1,0 +1,255 @@
+name: CI - vgo-gateway
+
+# 触发条件
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'vgo-gateway/**'
+      - 'vgo-kit/**'
+      - 'go.work'
+      - 'go.work.sum'
+      - '.github/workflows/vgo-gateway-ci.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'vgo-gateway/**'
+      - 'vgo-kit/**'
+      - 'go.work'
+      - 'go.work.sum'
+      - '.github/workflows/vgo-gateway-ci.yml'
+
+env:
+  GO_VERSION: '1.24.1'
+
+jobs:
+  # 测试作业
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: |
+          cd vgo-gateway
+          go mod download
+
+      - name: Run tests
+        run: |
+          cd vgo-gateway
+          go test -v -race -coverprofile=coverage.out ./...
+        env:
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./vgo-gateway/coverage.out
+          flags: vgo-gateway
+          name: vgo-gateway-coverage
+          fail_ci_if_error: false
+
+  # 代码质量检查
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: vgo-gateway
+          args: --timeout=5m
+
+  # 安全扫描
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Run Gosec Security Scanner
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: './vgo-gateway/...'
+
+  # 构建检查
+  build:
+    name: Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: |
+          cd vgo-gateway
+          go mod download
+
+      - name: Build application
+        run: |
+          cd vgo-gateway
+          CGO_ENABLED=0 GOOS=linux go build -o vgo-gateway ./cmd
+
+      - name: Verify binary
+        run: |
+          cd vgo-gateway
+          file vgo-gateway
+          ./vgo-gateway --version || echo "Version command not available"
+
+  # Docker构建测试（仅在PR时进行测试构建，不推送）
+  docker-build:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (test only)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./vgo-gateway/Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: vgo-gateway:test
+          build-args: |
+            VERSION=test
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 代码格式检查
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Check formatting
+        run: |
+          cd vgo-gateway
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "以下文件需要格式化："
+            gofmt -s -l .
+            exit 1
+          fi
+
+      - name: Check imports
+        run: |
+          cd vgo-gateway
+          go install golang.org/x/tools/cmd/goimports@latest
+          if [ "$(goimports -l . | wc -l)" -gt 0 ]; then
+            echo "以下文件的导入需要整理："
+            goimports -l .
+            exit 1
+          fi
+
+  # 依赖检查
+  deps:
+    name: Dependencies Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Check for vulnerabilities
+        run: |
+          cd vgo-gateway
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Verify dependencies
+        run: |
+          cd vgo-gateway
+          go mod verify
+          go mod tidy
+          git diff --exit-code go.mod go.sum
