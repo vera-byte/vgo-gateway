@@ -114,7 +114,7 @@ jobs:
           submodules: recursive
 
       - name: Run Gosec Security Scanner
-        uses: securecodewarrior/github-action-gosec@master
+        uses: securego/gosec@master
         with:
           args: './vgo-gateway/...'
 

@@ -13,6 +13,11 @@ on:
         required: true
         type: string
 
+# 权限配置
+permissions:
+  contents: write
+  packages: write
+
 env:
   GO_VERSION: '1.24.1'
   REGISTRY: ghcr.io
@@ -102,7 +107,7 @@ jobs:
           submodules: recursive
 
       - name: Run Gosec Security Scanner
-        uses: securecodewarrior/github-action-gosec@master
+        uses: securego/gosec@master
         with:
           args: './vgo-gateway/...'
 
@@ -199,12 +204,10 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          release_name: vgo-gateway ${{ steps.version.outputs.version }}
+          name: vgo-gateway ${{ steps.version.outputs.version }}
           body: |
             ## 🚀 vgo-gateway ${{ steps.version.outputs.version }}
             
